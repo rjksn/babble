@@ -1137,7 +1137,18 @@ class Babble_Post_Public {
 				$query_vars[ 'post_type' ] = bbl_get_post_type_in_lang( $query_vars[ 'post_type' ], bbl_get_current_lang_code() );
 			}
 		} else {
-			$query_vars[ 'post_type' ] = bbl_get_post_type_in_lang( 'post', bbl_get_current_lang_code() );
+			global $wpdb;
+
+			$query_slug = !empty( $query_vars['name'] ) ? $query_vars['name'] : $query_vars['attachment']; 
+			$request_language = strtolower( bbl_get_current_lang_code() ); 
+			$results = $wpdb->get_row( "SELECT * FROM $wpdb->posts WHERE $wpdb->posts.post_name='{$query_slug}' AND post_type LIKE '%$request_language' ", OBJECT );
+			
+			if ( $results && !is_wp_error( $results ) && !empty( $results->post_type ) ) {
+				$query_vars[ 'post_type' ] = $results->post_type;
+			} else {
+				$query_vars[ 'post_type' ] = bbl_get_post_type_in_lang( 'post', bbl_get_current_lang_code() );
+			}
+	
 		}
 
 		return $query_vars;
