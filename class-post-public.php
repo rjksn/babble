@@ -8,7 +8,7 @@
  */
 class Babble_Post_Public extends Babble_Plugin {
 
-	/**
+	/** 
 	 * A simple flag to stop infinite recursion when syncing
 	 * post meta places.
 	 *
@@ -98,6 +98,7 @@ class Babble_Post_Public extends Babble_Plugin {
 		$this->add_action( 'transition_post_status', null, null, 3 );
 		$this->add_action( 'updated_post_meta', null, null, 4 );
 		$this->add_action( 'wp_before_admin_bar_render' );
+		$this->add_action( 'parse_query', null, null, 10 ); // Me
 		$this->add_filter( 'add_menu_classes' );
 		$this->add_filter( 'add_post_metadata', null, null, 5 );
 		$this->add_filter( 'bbl_sync_meta_key', 'sync_meta_key', null, 2 );
@@ -112,8 +113,128 @@ class Babble_Post_Public extends Babble_Plugin {
 		$this->add_filter( 'bbl_translated_taxonomy', null, null, 2 );
 		$this->add_filter( 'admin_body_class' );
 
+		$this->add_filter( 'option_page_on_front', null, null, 2 );
+		$this->add_action( 'wp_get_nav_menu_items', null, null, 10 );
+
 		$this->initiate();
 	}
+
+	private $option_page_on_front_processing = false;
+
+	public function option_page_on_front( $value, $option ) {
+		// Skip the process if we're in the main language
+		if ( bbl_get_current_lang_code() === bbl_get_default_lang_code() )
+			return $value;
+
+		// This is recursively called, so we need to prevent that
+		if ( $this->option_page_on_front_processing )
+			return $value;
+
+		$this->option_page_on_front_processing = true;
+
+
+		// Create a variable name to use in getting the transients.
+		$transient_name = get_transient( __CLASS__ .'_fronts' ); 
+
+
+		// Check to see if we've been through this before.
+		$home_pages = get_transient( $transient_name );
+
+		// If we haven't been through this before, we'll create the transient.
+		if ( ! $home_pages ) {
+
+			$home_pages = array();
+			foreach( $this->get_post_translations( $value ) as $lang => $home_page ) {
+				if ( 'publish' !== $home_page->post_status )
+					continue;
+
+				$home_pages[ $lang ] = $home_page->ID;
+			}
+
+			set_transient( $transient_name, $home_pages, 12 * HOUR_IN_SECONDS );
+
+		}
+
+		$this->option_page_on_front_processing = false;
+
+		return isset( $home_pages[ bbl_get_current_lang_code() ] ) ? $home_pages[ bbl_get_current_lang_code() ] : $value;
+	}
+
+	/**
+	 * Translates the menu's post items before the menu gets built
+	 *
+	 * @param  WP_Query &$wp_query
+	 *
+	 * @return void
+	 */
+	public function wp_get_nav_menu_items( $items, $menu, $args ) {
+
+		if ( is_admin() )
+			return $items;
+
+		foreach( $items as $element ) {
+			if ( 'nav_menu_item' !== $element->post_type )
+				continue;
+
+			if ( $element->title == '%bbl_language_title%' ) {
+				foreach( bbl_get_switcher_links() as $key => $switch ) {
+					if ( bbl_get_current_lang_code() == $key )
+						continue;
+
+					$element->title = $switch["lang"]->display_name;
+					$element->url   = $switch["href"];				
+				}
+				continue;
+			}
+
+			if ( bbl_get_current_lang_code() === bbl_get_default_lang_code() )
+				continue;
+
+			if ( 'post_type' !== $element->type )
+				continue;
+
+			$post = bbl_get_post_in_lang( $element->object_id, bbl_get_current_lang_code() );
+
+			$element->title = $post->post_title;
+			$element->url   = get_permalink( $post->ID );
+		}
+
+
+		return $items;
+	}
+
+	/**
+	 * Ensure we have access to is_front_page and is_page since that's destroyed by Babble's translations.
+	 *
+	 * @param  WP_Query &$wp_query
+	 *
+	 * @return void
+	 */
+	public function parse_query( WP_Query & $wp_query ) {
+
+		if ( is_admin() )
+			return;
+
+		if ( ! $wp_query->is_main_query() )
+			return; 
+
+		// Alternative languages shouldn't erase the default functions. Is page = Is page_fr_ca
+		if ( isset( $wp_query->query['post_type'] ) && 'page' == bbl_get_base_post_type( $wp_query->query['post_type'] ) ) {
+			$wp_query->is_page = true;
+		}
+
+		if ( isset( $wp_query->query['bbl_done_translation'] ) && $wp_query->query['bbl_done_translation'] ) {
+
+			if ( 'page' == get_option('show_on_front') && isset( $wp_query->query['p'] ) ) {
+				$home_id = get_option('page_on_front');		
+
+				if ( $wp_query->query['p'] == $home_id ) {
+					$wp_query->post = get_post( $home_id );
+				}				
+			}
+		}
+	}
+
 	/**
 	 * Initiates
 	 *
@@ -164,7 +285,7 @@ class Babble_Post_Public extends Babble_Plugin {
 
 		$data = array(
 			'menu_id' => $menu_id,
-			'is_default_lang' => (bool) ( bbl_get_current_lang_code() == bbl_get_default_lang_code() ),
+			'is_default_lang'  => (bool) ( bbl_get_current_lang_code() == bbl_get_default_lang_code() ),
 			'is_bbl_post_type' => (bool) ( 0 === strpos( $post_type, 'bbl_' ) ),
 		);
 		wp_enqueue_script( 'post-public-admin', $this->url( 'js/post-public-admin.js' ), array( 'jquery' ), filemtime( $this->dir( 'js/post-public-admin.js' ) ) );
@@ -499,6 +620,15 @@ class Babble_Post_Public extends Babble_Plugin {
 			return;
 		}
 
+		// Stop this from destroying the menus.
+		if ( function_exists('get_current_screen') ) {
+			$current_screen = get_current_screen();
+
+			if ( isset( $current_screen ) && 'nav-menus' == $current_screen->base ) {
+				return;
+			}
+		}
+
 		$query->query_vars = $this->translate_query_vars( $query->query_vars );
 	}
 
@@ -511,7 +641,6 @@ class Babble_Post_Public extends Babble_Plugin {
 	 * @return void
 	 **/
 	public function parse_request( WP & $wp ) {
-
 		if ( isset( $wp->query_vars['bbl_translate'] ) and ( false === $wp->query_vars['bbl_translate'] ) ) {
 			return;
 		}
@@ -521,6 +650,7 @@ class Babble_Post_Public extends Babble_Plugin {
 		}
 
 		$wp->query_vars = $this->translate_query_vars( $wp->query_vars, $wp->request );
+
 	}
 
 	/**
@@ -703,7 +833,7 @@ class Babble_Post_Public extends Babble_Plugin {
 	 * @return array The array, like array( $permalink, $post_name )
 	 */
 	public function get_sample_permalink( $permalink, $title, $name, $id, $post ) {
-		$permalink[ 0 ] = $this->post_type_link( $permalink[ 0 ], $post, $leavename );
+		$permalink[ 0 ] = $this->post_type_link( $permalink[ 0 ], $post, false );
 		return $permalink;
 	}
 
@@ -1044,8 +1174,16 @@ class Babble_Post_Public extends Babble_Plugin {
 		$lang_url_prefix = isset( $query_vars[ 'lang_url_prefix' ] ) ? $query_vars[ 'lang_url_prefix' ] : get_query_var( 'lang_url_prefix' );
 		$lang = isset( $query_vars[ 'lang' ] ) ? $query_vars[ 'lang' ] : get_query_var( 'lang' );
 
+
+
 		// Detect language specific homepages
 		if ( $request == $lang_url_prefix ) {
+	
+			// This is running in Admin, and as such seems to be fucking up the menus. Idk when this became an issue.
+			if ( isset( $query_vars['post_type'] ) && 'nav_menu_item' == $query_vars['post_type'] ) {
+				return $query_vars;
+			}
+
 			unset( $query_vars[ 'error' ] );
 
 			// @FIXME: Cater for front pages which don't list the posts
@@ -1064,7 +1202,6 @@ class Babble_Post_Public extends Babble_Plugin {
 				$query_vars[ 'post_type' ] = $this->get_post_type_in_lang( $post_type, bbl_get_current_lang_code() );
 
 			}
-
 			return $query_vars;
 		}
 
@@ -1110,7 +1247,18 @@ class Babble_Post_Public extends Babble_Plugin {
 				$query_vars[ 'post_type' ] = bbl_get_post_type_in_lang( $query_vars[ 'post_type' ], bbl_get_current_lang_code() );
 			}
 		} else {
-			$query_vars[ 'post_type' ] = bbl_get_post_type_in_lang( 'post', bbl_get_current_lang_code() );
+			// @FIXME: A solution to the plugin's inability to translate base posts AND pages. 
+			global $wpdb;
+
+			$query_slug = !empty( $query_vars['name'] ) ? $query_vars['name'] : $query_vars['attachment']; 
+			$request_language = strtolower( bbl_get_current_lang_code() ); 
+			$results = $wpdb->get_row( "SELECT * FROM $wpdb->posts WHERE $wpdb->posts.post_name='{$query_slug}' AND post_type LIKE '%$request_language' ", OBJECT );
+			
+			if ( $results && !is_wp_error( $results ) && !empty( $results->post_type ) ) {
+				$query_vars[ 'post_type' ] = $results->post_type;
+			} else {
+				$query_vars[ 'post_type' ] = bbl_get_post_type_in_lang( 'post', bbl_get_current_lang_code() );
+			}
 		}
 
 		return $query_vars;
@@ -1318,10 +1466,14 @@ class Babble_Post_Public extends Babble_Plugin {
 	 **/
 	public function get_post_in_lang( $post, $lang_code, $fallback = true ) {
 		$translations = $this->get_post_translations( $post );
+
 		if ( isset( $translations[ $lang_code ] ) ) {
 			return $translations[ $lang_code ];
 		}
 		if ( ! $fallback ) {
+			return false;
+		}
+		if ( ! isset( $translations[ bbl_get_default_lang_code() ] ) ) {
 			return false;
 		}
 		return $translations[ bbl_get_default_lang_code() ];
@@ -1458,7 +1610,7 @@ class Babble_Post_Public extends Babble_Plugin {
 	function get_transid( $post, $create = true ) {
 		$post = get_post( $post );
 
-		if ( ! $post->ID )
+		if ( ! $post || ! $post->ID )
 			return false;
 
 		if ( $transid = wp_cache_get( $post->ID, 'bbl_post_transids' ) ) {
